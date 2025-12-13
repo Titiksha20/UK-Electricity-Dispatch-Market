@@ -4,13 +4,13 @@ import matplotlib.pyplot as plt
 
 
 def load_data(path):
-    windplants   = pd.read_excel(path, "windplants")
-    wind_lf      = pd.read_excel(path, "wind_loadfactors")
-    solarplants  = pd.read_excel(path, "solarplants")
-    solar_lf     = pd.read_excel(path, "solar_loadfactors")
-    gasplants    = pd.read_excel(path, "gasplants")
-    gas_prices   = pd.read_excel(path, "gas_prices")
-    demand       = pd.read_excel(path, "demand")
+    windplants = pd.read_excel(path, "windplants")
+    wind_lf = pd.read_excel(path, "wind_loadfactors")
+    solarplants = pd.read_excel(path, "solarplants")
+    solar_lf = pd.read_excel(path, "solar_loadfactors")
+    gasplants = pd.read_excel(path, "gasplants")
+    gas_prices = pd.read_excel(path, "gas_prices")
+    demand  = pd.read_excel(path, "demand")
 
     # Ensure time series are sorted
     for df in [wind_lf, solar_lf, gas_prices, demand]:
@@ -20,8 +20,11 @@ def load_data(path):
 
 
 def process_renewables(plants, loadfactors, tech):
+     # Reshape load factors to long format and merge with plant data
     lf = loadfactors.melt(id_vars="hour", var_name="name", value_name="load_factor")
     df = lf.merge(plants, on="name")
+     # Compute hourly available output
+    # Zero marginal cost for all renewables
     df["available_mw"] = df["capacity"] * df["load_factor"]
     df["marginal_cost"] = 0.0
     df["tech"] = tech
@@ -30,18 +33,24 @@ def process_renewables(plants, loadfactors, tech):
 
 
 def process_gas(gasplants, gas_prices):
+    # Combine gas plants with hourly gas prices
     g = gasplants.assign(key=1).merge(gas_prices.assign(key=1), on="key").drop("key", axis=1)
+    
+    # Combine gas plants with hourly gas prices
     g["available_mw"] = g["capacity"]
-    g["marginal_cost"] = (g["price"] * 34.121) / g["efficiency"]
+    g["marginal_cost"] = (g["price"] * 34.121) / (100*g["efficiency"])
     g["tech"] = "Gas"
     return g
 
 
 def dispatch_hourly(generators, demand):
+    # Hourly merit-order dispatch
     records = []
 
     for h in demand["hour"]:
         need = demand.loc[demand["hour"] == h, "demand"].iat[0]
+
+        # Sort by marginal cost for merit order
         stack = generators[generators["hour"] == h].sort_values("marginal_cost")
 
         sent = 0
@@ -64,14 +73,20 @@ def dispatch_hourly(generators, demand):
 
 
 def summarize_hourly(dispatch_df, demand):
+    # Aggregate dispatch by hour and technology
     table = dispatch_df.groupby(["hour", "tech"])["dispatched_mw"].sum().unstack(fill_value=0)
+
     table["dispatched"] = table.sum(axis=1)
 
+    # Add demand and compute system-level indicators
     table = table.merge(demand, on="hour")
     table["shortage"] = table["dispatched"] < table["demand"] - 1e-2
     table["mismatch"] = table["dispatched"] - table["demand"]
+
+    # Hourly marginal price = highest MC unit dispatched
     table["price"] = dispatch_df.groupby("hour")["marginal_cost"].max().values
 
+    # Tech shares
     for t in ["Wind", "Solar", "Gas"]:
         table[t] = table.get(t, 0)
         table[f"{t.lower()}_pct"] = table[t] / table["dispatched"]
@@ -92,7 +107,7 @@ def apply_prorata(generators, demand):
 
         total_re = re_stack["available_mw"].sum()
 
-        # Oversupply → pro-rata
+        # Oversupply - pro-rata
         if total_re >= need:
             for _, row in re_stack.iterrows():
                 share = row["available_mw"] / total_re
@@ -104,7 +119,7 @@ def apply_prorata(generators, demand):
                     "marginal_cost": 0.0
                 })
 
-        # Undersupply → full renewables + gas by merit order
+        # Undersupply - full renewables + gas by merit order
         else:
             for _, row in re_stack.iterrows():
                 records.append({
